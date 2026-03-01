@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SmartCam Enterprise</title>
+
+<style>
+body {
+    margin: 0;
+    font-family: Arial, sans-serif;
+    background: #0f172a;
+    color: #e2e8f0;
+}
+
+header {
+    background: #111827;
+    padding: 15px 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.status-bar {
+    display: flex;
+    gap: 8px;
+    font-size: 13px;
+}
+
+.status {
+    padding: 4px 8px;
+    border-radius: 12px;
+    font-weight: bold;
+}
+
+.green { background: #065f46; color: #10b981; }
+.yellow { background: #78350f; color: #f59e0b; }
+.red { background: #7f1d1d; color: #ef4444; }
+
+nav {
+    background: #111827;
+    padding: 10px;
+}
+
+nav button {
+    background: #1f2937;
+    color: #e2e8f0;
+    border: none;
+    padding: 10px 15px;
+    margin-right: 10px;
+    cursor: pointer;
+    border-radius: 6px;
+}
+
+iframe {
+    width: 100%;
+    height: calc(100vh - 140px);
+    border: none;
+}
+
+.logout-btn {
+    background:#7f1d1d;
+    color:white;
+    border:none;
+    padding:8px 12px;
+    border-radius:6px;
+    cursor:pointer;
+}
+</style>
+</head>
+<body>
+
+<header>
+    <div>SmartCam Enterprise Console</div>
+    <div class="status-bar">
+        CPU <span id="cpu" class="status green">--</span>
+        Temp <span id="temp" class="status green">--</span>
+        Disk <span id="disk" class="status green">--</span>
+        Rec <span id="rec" class="status green">--</span>
+    </div>
+    <button class="logout-btn" onclick="logout()">Logout</button>
+</header>
+
+<nav>
+    <button onclick="loadPage('/dashboard/')">Dashboard</button>
+    <button onclick="loadPage('/live/')">Live</button>
+    <button onclick="loadPage('/files/')">Files</button>
+</nav>
+
+<iframe id="contentFrame"></iframe>
+
+<script>
+
+function loadPage(url) {
+    document.getElementById("contentFrame").src = url;
+}
+
+function logout() {
+    fetch('/logout', { cache: "no-store" })
+    .then(() => {
+        // Force browser to forget credentials by requesting with invalid auth
+        window.location.href = "https://invalid:invalid@" + window.location.host + "/?logout=" + Date.now();
+    })
+    .catch(() => {
+        window.location.href = "/";
+    });
+}
+
+function setBadge(id, value, thresholds) {
+    let el = document.getElementById(id);
+    let numeric = parseFloat(value);
+    let color = "green";
+
+    if (numeric >= thresholds.red) color = "red";
+    else if (numeric >= thresholds.yellow) color = "yellow";
+
+    el.className = "status " + color;
+    el.innerText = value;
+}
+
+function updateStatus() {
+    fetch('/dashboard/status')
+    .then(res => res.json())
+    .then(data => {
+        setBadge("cpu", data.cpu + "%", {yellow:60, red:80});
+        setBadge("temp", data.temp + " C", {yellow:65, red:75});
+        setBadge("disk", data.disk + "%", {yellow:75, red:85});
+
+        let rec = document.getElementById("rec");
+        if (data.ready) {
+            rec.className = "status green";
+            rec.innerText = "LIVE";
+        } else {
+            rec.className = "status red";
+            rec.innerText = "OFFLINE";
+        }
+    });
+}
+
+setInterval(updateStatus, 10000);
+updateStatus();
+
+</script>
+
+</body>
+</html>
