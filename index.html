@@ -124,7 +124,7 @@ function updateStatus() {
     .then(data => {
         setBadge("cpu", data.cpu + "%", {yellow:60, red:80});
         setBadge("temp", data.temp + " C", {yellow:65, red:75});
-        setBadge("disk", data.disk + "%", {yellow:75, red:85});
+        setBadge("disk", data.disk_percent + "%", {yellow:75, red:85});
 
         let rec = document.getElementById("rec");
         if (data.ready) {

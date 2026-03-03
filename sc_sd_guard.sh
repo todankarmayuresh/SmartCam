@@ -2,18 +2,28 @@
 
 set -euo pipefail
 
-LOCK_FILE="/tmp/sc_sd_guard.lock"
+# -------------------------------------------------
+# Lock Protection (Standardized)
+# -------------------------------------------------
+APP_DIR="/opt/smartcam"
+LOCK_DIR="${APP_DIR}/locks"
+STATE_DIR="/var/lib/smartcam"
+LOG_DIR="/var/log/smartcam"
+
+mkdir -p "$LOCK_DIR" "$STATE_DIR" "$LOG_DIR"
+
+LOCK_FILE="${LOCK_DIR}/sc_sd_guard.lock"
 exec 200>"$LOCK_FILE"
 flock -n 200 || {
-    echo "Another SD Guard instance is running. Exiting." >> /var/log/smartcam/sd_guard.log
+    echo "Another SD Guard instance is running. Exiting." >> "${LOG_DIR}/sd_guard.log"
     exit 0
 }
 
 START_TIME=$(date +%s)
 
 # Load SmartCam environment (for Telegram alerts)
-if [ -f /etc/smartcam/.env ]; then
-    source /etc/smartcam/.env
+if [ -f /opt/smartcam/.env ]; then
+    source /opt/smartcam/.env
 fi
 
 # SmartCam SD Protection Guard
@@ -22,37 +32,29 @@ RECORD_DIR="/var/lib/smartcam/recordings"
 # Safety: determine today's folder (format: YYYY-MM-DD)
 TODAY_FOLDER="$(date +%Y-%m-%d)"
 
-LOG_FILE="/var/log/smartcam/sd_guard.log"
+LOG_FILE="${LOG_DIR}/sd_guard.log"
 
-LOCK_DISABLE="/etc/smartcam/sd_guard.disable"
+LOCK_DISABLE="/opt/smartcam/sd_guard.disable"
 
 # Allow thresholds from environment
 MIN_FREE_MB=${MIN_FREE_MB:-2048}
 EMERGENCY_THRESHOLD_MB=${EMERGENCY_THRESHOLD_MB:-1024}
 
-# Safety: prevent accidental deletion if mount missing
-if ! mountpoint -q /var/lib/smartcam; then
-    echo "CRITICAL: Recording mount missing! Cleanup aborted." >> "$LOG_FILE"
-    if alert_cooldown; then
-        send_alert "CRITICAL: Recording mount missing. SD Guard aborted."
-    fi
-    exit 1
-fi
+MIN_FREE_PERCENT=${MIN_FREE_PERCENT:-10}        # minimum 10% free
+PREDICT_THRESHOLD_PERCENT=${PREDICT_THRESHOLD_PERCENT:-15}  # early warning at 15%
 
-# Manual disable lock
-if [ -f "$LOCK_DISABLE" ]; then
-    echo "SD Guard disabled via lock file." >> "$LOG_FILE"
-    exit 0
-fi
+HEALTH_JSON="${STATE_DIR}/sd_guard_health.json"
 
-# Samba backup configuration
-SAMBA_PATH="/mnt/smartcam_backup"
-# Samba credentials must be defined in /etc/smartcam/.env:
-
-ALERT_LOCK="/tmp/sd_guard_alert.lock"
+# -------------------------------------------------
+# Alert Functions (Must Be Defined Before Use)
+# -------------------------------------------------
+ALERT_LOCK="${LOCK_DIR}/sd_guard_alert.lock"
 
 send_alert() {
-    if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
+    if [ "${TELEGRAM_ENABLED:-false}" != "true" ]; then
+        return
+    fi
+    if [ -z "${BOT_TOKEN:-}" ] || [ -z "${CHAT_ID:-}" ]; then
         return
     fi
     MESSAGE="$1"
@@ -74,16 +76,55 @@ alert_cooldown() {
     return 0
 }
 
+
+# -------------------------------------------------
+# Optional Mount Enforcement (Enterprise Safe)
+# Only enforce mount check if explicitly enabled
+# -------------------------------------------------
+REQUIRE_RECORD_MOUNT=${REQUIRE_RECORD_MOUNT:-false}
+
+if [ "$REQUIRE_RECORD_MOUNT" = "true" ]; then
+    if ! mountpoint -q /var/lib/smartcam; then
+        echo "CRITICAL: Recording mount missing! Cleanup aborted." >> "$LOG_FILE"
+        if alert_cooldown; then
+            send_alert "CRITICAL: Recording mount missing. SD Guard aborted."
+        fi
+        exit 1
+    fi
+fi
+
+# Manual disable lock
+if [ -f "$LOCK_DISABLE" ]; then
+    echo "SD Guard disabled via lock file." >> "$LOG_FILE"
+    exit 0
+fi
+
+# Samba backup configuration
+SAMBA_PATH="/mnt/smartcam_backup"
+# Samba credentials must be defined in /etc/smartcam/.env:
+
+
 if [ "${SD_WEAR_REDUCTION:-0}" != "1" ]; then
     echo "===== SD Guard Run $(date) =====" >> "$LOG_FILE"
 fi
 
-# Get available free space in MB
-FREE_MB=$(df -m /var/lib/smartcam | awk 'NR==2 {print $4}')
+# Get available free space in MB and percentage
+DISK_LINE=$(df -m /var/lib/smartcam | awk 'NR==2')
+FREE_MB=$(echo "$DISK_LINE" | awk '{print $4}')
+USED_PERCENT=$(df /var/lib/smartcam | awk 'NR==2 {gsub("%","",$5); print $5}')
+FREE_PERCENT=$((100 - USED_PERCENT))
 
 echo "Free space: ${FREE_MB}MB" >> "$LOG_FILE"
 
-if [ "$FREE_MB" -lt "$MIN_FREE_MB" ]; then
+# Predictive early warning
+if [ "$FREE_PERCENT" -lt "$PREDICT_THRESHOLD_PERCENT" ]; then
+    if alert_cooldown; then
+        send_alert "Disk trending low (${FREE_PERCENT}% free). Pre-threshold warning."
+    fi
+fi
+
+
+if [ "$FREE_MB" -lt "$MIN_FREE_MB" ] || [ "$FREE_PERCENT" -lt "$MIN_FREE_PERCENT" ]; then
     echo "Low disk space detected. Starting folder cleanup..." >> "$LOG_FILE"
 
     if alert_cooldown; then
@@ -135,13 +176,13 @@ if [ "$FREE_MB" -lt "$MIN_FREE_MB" ]; then
         if ! mountpoint -q "$SAMBA_PATH"; then
             echo "Samba not mounted. Attempting credential-based mount..." >> "$LOG_FILE"
 
-            if [ -z "$SAMBA_SERVER" ] || [ -z "$SAMBA_USER" ] || [ -z "$SAMBA_PASS" ]; then
+            if [ -z "${SMB_SHARE:-}" ] || [ -z "${SMB_USER:-}" ] || [ -z "${SMB_PASS:-}" ]; then
                 echo "Samba credentials missing in .env" >> "$LOG_FILE"
             else
                 mkdir -p "$SAMBA_PATH"
 
-                mount -t cifs "$SAMBA_SERVER" "$SAMBA_PATH" \
-                    -o username="$SAMBA_USER",password="$SAMBA_PASS",rw,vers=3.0,file_mode=0777,dir_mode=0777 \
+                mount -t cifs "$SMB_SHARE" "$SAMBA_PATH" \
+                    -o username="$SMB_USER",password="$SMB_PASS",rw,vers=3.0,file_mode=0777,dir_mode=0777 \
                     >> "$LOG_FILE" 2>&1
 
                 sleep 2
@@ -207,8 +248,21 @@ else
     echo "Disk healthy." >> "$LOG_FILE"
 fi
 
+# -------------------------------------------------
+# SD Guard Health JSON (Dashboard Integration)
+# -------------------------------------------------
+cat <<EOF > "$HEALTH_JSON"
+{
+  "timestamp": "$(date '+%Y-%m-%d %H:%M:%S')",
+  "free_mb": $FREE_MB,
+  "free_percent": $FREE_PERCENT,
+  "min_free_mb": $MIN_FREE_MB,
+  "min_free_percent": $MIN_FREE_PERCENT
+}
+EOF
+
 # Heartbeat update
-echo "$(date +%s)" > /var/lib/smartcam/sd_guard.heartbeat
+echo "$(date +%s)" > "${STATE_DIR}/sd_guard.heartbeat"
 
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))

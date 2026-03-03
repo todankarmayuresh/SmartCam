@@ -1,4 +1,3 @@
-
 #!/bin/bash
 
 # ----------------------------------------------------------
@@ -16,24 +15,18 @@ fi
 # ----------------------------------------------------------
 START_TIME=$(date +%s)
 
-HEARTBEAT_FILE="/var/lib/smartcam/guard_heartbeat"
-mkdir -p /var/lib/smartcam
-
 # ----------------------------------------------------------
-# Heartbeat Stale Detection (self-monitor)
+# Core Paths & Directories (Standardized)
 # ----------------------------------------------------------
-if [ -f "$HEARTBEAT_FILE" ]; then
-    LAST_BEAT_EPOCH=$(awk -F'|' '{print $2}' "$HEARTBEAT_FILE" | tr -d ' ')
-    NOW_EPOCH=$(date +%s)
+APP_DIR="/opt/smartcam"
+LOCK_DIR="${APP_DIR}/locks"
+STATE_DIR="/var/lib/smartcam"
+LOG_DIR="/var/log/smartcam"
 
-    if [ -n "$LAST_BEAT_EPOCH" ]; then
-        AGE=$((NOW_EPOCH - LAST_BEAT_EPOCH))
-        if [ "$AGE" -gt "$HEARTBEAT_STALE_LIMIT" ]; then
-            echo "$(date '+%Y-%m-%d %H:%M:%S') | Heartbeat stale (${AGE}s). Restarting MediaMTX." >> "$LOG_FILE"
-            systemctl restart mediamtx
-        fi
-    fi
-fi
+mkdir -p "$LOCK_DIR" "$STATE_DIR" "$LOG_DIR"
+
+LOG_FILE="${LOG_DIR}/guard.log"
+HEARTBEAT_FILE="${STATE_DIR}/guard_heartbeat"
 
 # ==========================================================
 # SmartCam Enterprise Guard v2 (Production Consolidated)
@@ -45,7 +38,7 @@ set -o pipefail
 # ----------------------------------------------------------
 # Environment Loader
 # ----------------------------------------------------------
-ENV_FILE="/etc/smartcam/.env"
+ENV_FILE="/opt/smartcam/.env"
 if [ -f "$ENV_FILE" ]; then
     set -a
     source "$ENV_FILE"
@@ -76,11 +69,27 @@ fi
 : ${HEARTBEAT_STALE_LIMIT:=600}     # seconds (10 min)
 : ${SD_WEAR_REDUCTION:=no}         # yes/no
 
-LOCK_FILE="/tmp/smartcam_alert.lock"
-RAM_COUNTER_FILE="/tmp/smartcam_ram_counter"
-STREAM_COUNTER_FILE="/tmp/smartcam_stream_counter"
-NETWORK_COUNTER_FILE="/tmp/smartcam_network_counter"
-REBOOT_COUNTER_FILE="/tmp/smartcam_reboot_counter"
+# ----------------------------------------------------------
+# Heartbeat Stale Detection (self-monitor)
+# ----------------------------------------------------------
+if [ -f "$HEARTBEAT_FILE" ]; then
+    LAST_BEAT_EPOCH=$(awk -F'|' '{print $2}' "$HEARTBEAT_FILE" | tr -d ' ')
+    NOW_EPOCH=$(date +%s)
+
+    if [ -n "$LAST_BEAT_EPOCH" ]; then
+        AGE=$((NOW_EPOCH - LAST_BEAT_EPOCH))
+        if [ "$AGE" -gt "$HEARTBEAT_STALE_LIMIT" ]; then
+            log "Heartbeat stale (${AGE}s). Restarting MediaMTX."
+            systemctl restart mediamtx
+        fi
+    fi
+fi
+
+LOCK_FILE="${LOCK_DIR}/alert.lock"
+RAM_COUNTER_FILE="${LOCK_DIR}/ram.counter"
+STREAM_COUNTER_FILE="${LOCK_DIR}/stream.counter"
+NETWORK_COUNTER_FILE="${LOCK_DIR}/network.counter"
+REBOOT_COUNTER_FILE="${LOCK_DIR}/reboot.counter"
 CONFIG_BACKUP_DIR="/var/lib/smartcam/config_backup"
 
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -271,7 +280,7 @@ fi
 # Daily Config Backup
 # ----------------------------------------------------------
 TODAY=$(date +%Y-%m-%d)
-BACKUP_MARKER="/tmp/smartcam_backup_marker"
+BACKUP_MARKER="${LOCK_DIR}/daily_backup.marker"
 
 if [ "$(cat $BACKUP_MARKER 2>/dev/null)" != "$TODAY" ]; then
     mkdir -p "$CONFIG_BACKUP_DIR"
@@ -287,7 +296,7 @@ DURATION=$((END_TIME - START_TIME))
 # Update heartbeat file (epoch + human readable)
 if [ "$SD_WEAR_REDUCTION" = "yes" ]; then
     # Only update heartbeat every 3 cycles (~cron 1min = every 3 min)
-    HB_COUNTER_FILE="/tmp/smartcam_hb_counter"
+    HB_COUNTER_FILE="${LOCK_DIR}/hb.counter"
     COUNT=$(cat "$HB_COUNTER_FILE" 2>/dev/null || echo 0)
     COUNT=$((COUNT + 1))
 

@@ -8,9 +8,12 @@ set -euo pipefail
 START_TIME=$(date +%s)
 
 # -------------------------------------------------
-# Lock Protection
+# Lock Protection (Standardized)
 # -------------------------------------------------
-LOCK_FILE="/tmp/sc_backup.lock"
+APP_DIR="/opt/smartcam"
+LOCK_DIR="${APP_DIR}/locks"
+mkdir -p "$LOCK_DIR"
+LOCK_FILE="${LOCK_DIR}/sc_backup.lock"
 exec 200>"$LOCK_FILE"
 flock -n 200 || exit 0
 
@@ -23,11 +26,13 @@ STATE_DIR="/var/lib/smartcam"
 BACKUP_ROOT="$STATE_DIR/backups"
 SNAPSHOT_DIR="$BACKUP_ROOT/snapshots"
 MOUNT_POINT="/mnt/smartcam-backup"
-HEALTH_JSON="$STATE_DIR/backup_state.json"
+HEALTH_JSON="$STATE_DIR/backup_health.json"
 FAIL_COUNTER_FILE="$STATE_DIR/backup_fail_count"
 FAIL_ALERT_THRESHOLD="${BACKUP_FAIL_ALERT_THRESHOLD:-3}"
 
 mkdir -p "$LOG_DIR" "$BACKUP_ROOT" "$SNAPSHOT_DIR"
+mkdir -p "$LOCK_DIR"
+chmod 750 "$LOCK_DIR"
 touch "$LOG_FILE"
 chmod 640 "$LOG_FILE"
 
@@ -40,8 +45,8 @@ log "===== Backup Run Started ====="
 # -------------------------------------------------
 # Load ENV
 # -------------------------------------------------
-if [ -f /etc/smartcam/.env ]; then
-    source /etc/smartcam/.env
+if [ -f /opt/smartcam/.env ]; then
+    source /opt/smartcam/.env
 else
     log "ENV file missing!"
     exit 1
@@ -54,8 +59,14 @@ MIN_FREE_MB="${BACKUP_MIN_FREE_MB:-1024}"
 # -------------------------------------------------
 # Disk Safety Check
 # -------------------------------------------------
-FREE_MB=$(df -m "$STATE_DIR" | awk 'NR==2 {print $4}')
-if [[ "$FREE_MB" =~ ^[0-9]+$ ]] && [ "$FREE_MB" -lt "$MIN_FREE_MB" ]; then
+FREE_MB=$(df -m "$STATE_DIR" 2>/dev/null | awk 'NR==2 {print $4}')
+
+if ! [[ "$FREE_MB" =~ ^[0-9]+$ ]]; then
+    log "CRITICAL: Unable to determine free space for $STATE_DIR"
+    exit 1
+fi
+
+if [ "$FREE_MB" -lt "$MIN_FREE_MB" ]; then
     log "CRITICAL: Not enough free space (${FREE_MB}MB free)"
     CURRENT_FAIL=$(( $(cat "$FAIL_COUNTER_FILE" 2>/dev/null || echo 0) + 1 ))
     echo "$CURRENT_FAIL" > "$FAIL_COUNTER_FILE"
@@ -90,7 +101,6 @@ fi
 mkdir -p "$SNAPSHOT_PATH"
 
 if ! timeout 600 rsync -a --delete $PREVIOUS \
-    /etc/smartcam \
     /etc/mediamtx \
     /opt/smartcam \
     /etc/nginx/sites-available/smartcam \

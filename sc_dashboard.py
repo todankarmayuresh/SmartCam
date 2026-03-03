@@ -12,8 +12,17 @@ from datetime import datetime
 # Environment Loader
 # -------------------------------------------------
 ENV_FILE = "/etc/smartcam/.env"
+ALT_ENV_FILE = "/opt/smartcam/.env"
+
 if os.path.exists(ENV_FILE):
-    with open(ENV_FILE) as f:
+    load_file = ENV_FILE
+elif os.path.exists(ALT_ENV_FILE):
+    load_file = ALT_ENV_FILE
+else:
+    load_file = None
+
+if load_file:
+    with open(load_file) as f:
         for line in f:
             if line.strip() and not line.startswith("#") and "=" in line:
                 key, val = line.strip().split("=", 1)
@@ -24,16 +33,46 @@ STREAM_NAME = os.environ.get("STREAM_NAME", "live")
 MIN_BITRATE = float(os.environ.get("MIN_BITRATE_MBPS", "1"))
 
 HEARTBEAT_FILE = "/var/lib/smartcam/guard_heartbeat"
+SD_HEARTBEAT_FILE = "/var/lib/smartcam/sd_guard.heartbeat"
+SD_STALE_LIMIT = int(os.environ.get("SD_HEARTBEAT_STALE_LIMIT", "900"))
 BOOT_ALERT_FLAG = "/var/lib/smartcam/boot_alert.flag"
 BOOT_EVENT_FILE = "/var/lib/smartcam/boot_event.json"
-BACKUP_HEALTH_FILE = "/var/lib/smartcam/backup_health.json"
+BACKUP_HEALTH_FILE = "/var/lib/smartcam/backup_state.json"
 BACKUP_WARN_AGE_MIN = int(os.environ.get("BACKUP_WARN_AGE_MIN", "1440"))  # default 24h
 HEARTBEAT_STALE_LIMIT = int(os.environ.get("HEARTBEAT_STALE_LIMIT", "600"))
 
 # -------------------------------------------------
 # Global Cached State
 # -------------------------------------------------
-cached_data = {}
+cached_data = {
+    "cpu": 0,
+    "temp": 0,
+    "disk_percent": 0,
+    "disk_free_mb": 0,
+    "ram": 0,
+    "uptime": "Starting...",
+    "load_avg": "0.00",
+    "ready": False,
+    "readers": 0,
+    "bitrate": 0,
+    "freeze": False,
+    "services": {
+        "mediamtx": "unknown",
+        "filebrowser": "unknown",
+        "watchdog": "unknown"
+    },
+    "guard_status": "Unknown",
+    "guard_age": -1,
+    "warnings": [],
+    "health_score": 0,
+    "health_label": "Initializing",
+    "boot_event": {},
+    "boot_escalation": False,
+    "backup_status": "Unknown",
+    "backup_age_min": -1,
+    "backup_failures": 0
+}
+
 last_snapshot_write = 0
 snapshot_interval = 30  # seconds
 
@@ -87,9 +126,9 @@ def collect_metrics():
         load_avg = run("awk '{print $1}' /proc/loadavg")
 
         services = {
-            "mediamtx": run("systemctl is-active mediamtx"),
-            "filebrowser": run("systemctl is-active filebrowser"),
-            "watchdog": run("systemctl is-active watchdog")
+            "mediamtx": run("systemctl is-active mediamtx") or "inactive",
+            "filebrowser": run("systemctl is-active filebrowser") or "inactive",
+            "watchdog": run("systemctl is-active watchdog") or "inactive"
         }
 
         ready = False
@@ -167,6 +206,30 @@ def collect_metrics():
             guard_status = "Missing"
 
         # -------------------------------------------------
+        # SD Guard Heartbeat Check
+        # -------------------------------------------------
+        sd_status = "Unknown"
+        sd_age = -1
+
+        if os.path.exists(SD_HEARTBEAT_FILE):
+            try:
+                with open(SD_HEARTBEAT_FILE) as sf:
+                    sd_epoch = int(sf.read().strip())
+                sd_age = int(time.time() - sd_epoch)
+
+                if sd_age <= SD_STALE_LIMIT:
+                    sd_status = "Healthy"
+                else:
+                    sd_status = "Stale"
+            except:
+                sd_status = "Error"
+        else:
+            sd_status = "Missing"
+
+        if sd_status in ["Stale", "Missing", "Error"]:
+            health_score -= 15
+
+        # -------------------------------------------------
         # Boot Intelligence Integration
         # -------------------------------------------------
         boot_event = {}
@@ -230,6 +293,8 @@ def collect_metrics():
             "services": services,
             "guard_status": guard_status,
             "guard_age": guard_age,
+            "sd_status": sd_status,
+            "sd_age": sd_age,
             "warnings": warnings,
             "health_score": health_score,
             "health_label": "Excellent" if health_score >= 90 else "Stable" if health_score >= 70 else "Warning" if health_score >= 50 else "Critical",
@@ -238,6 +303,7 @@ def collect_metrics():
             "backup_status": backup_status,
             "backup_age_min": backup_age_min,
             "backup_failures": backup_failures,
+            "backup_warn_age_min": BACKUP_WARN_AGE_MIN,
         }
 
         if now - last_snapshot_write > snapshot_interval:
@@ -271,7 +337,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/restart-guard":
-            system_cmd("systemctl restart smartcam-guard.service || systemctl restart sc_guard.service || pkill -f sc_guard.sh")
+            system_cmd("systemctl restart sc-guard.service || systemctl restart sc_guard.service || pkill -f sc_guard.sh")
             self.send_response(302)
             self.send_header("Location", "/")
             self.end_headers()
@@ -363,7 +429,7 @@ function update(){
       "Last Success: " + (d.backup_age_min >= 0 ? d.backup_age_min + " min ago" : "N/A") + "<br>" +
       "Failures: " + d.backup_failures;
 
-    if (d.backup_age_min > 0 && d.backup_age_min > """ + str(BACKUP_WARN_AGE_MIN) + """) {
+    if (d.backup_age_min > 0 && d.backup_age_min > d.backup_warn_age_min) {
         document.getElementById("alertBanner").style.display = "block";
         document.getElementById("alertBanner").innerHTML =
           "<strong>Warning:</strong> Backup is older than expected threshold.";

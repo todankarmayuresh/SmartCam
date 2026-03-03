@@ -11,7 +11,7 @@ START_TIME=$(date +%s)
 # -------------------------------------------------
 # Lock Protection (Prevent Parallel Runs)
 # -------------------------------------------------
-LOCK_FILE="/tmp/sc_guard.lock"
+LOCK_FILE="/var/lib/smartcam/sc_backup.lock"
 exec 200>"$LOCK_FILE"
 flock -n 200 || exit 0
 
